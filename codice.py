@@ -10,7 +10,7 @@ def calcola_media_voti(lista_voti):
     # ERRORE LOGICO: Se lista_voti è [], lista_voti.length (o len() in Python) è 0.
     # Questo provocherà un ZeroDivisionError.
     media = somma_totale / len(lista_voti)
-    
+    #con print(f"Somma totale: {somma_totale}, Numero di voti: {len(lista_voti)}, Media: {media}")
     return media
 
 # Esempio d'uso che funziona
