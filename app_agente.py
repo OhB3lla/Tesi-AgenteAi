@@ -3,202 +3,234 @@ import sys
 import subprocess
 import re
 import threading
+import difflib
+import stat
+import tkinter as tk
+from tkinter import filedialog
 from google import genai
 import customtkinter as ctk
 
-# --- 1. FUNZIONI HELPER ---
-def leggi_contenuto_file(lista_nomi):
-    testo_accumulato = ""
-    for nome in lista_nomi:
-        if not os.path.exists(nome) or os.path.isdir(nome):
+#'installazione automatica dell'hook in un repo target
+if len(sys.argv) > 1 and sys.argv[1] == "--install":
+    root = tk.Tk()
+    root.withdraw()
+    
+    print("Seleziona la root del progetto Git...")
+    target_dir = filedialog.askdirectory(title="Seleziona il repository Git")
+    
+    if not target_dir:
+        sys.exit(1)
+
+    hooks_dir = os.path.join(target_dir, ".git", "hooks")
+    if not os.path.exists(hooks_dir):
+        print("Errore: cartella .git/hooks non trovata. Sicuro sia un repo Git?")
+        sys.exit(1)
+        
+    pre_push_path = os.path.join(hooks_dir, "pre-push")
+    script_path = os.path.abspath(__file__).replace("\\", "/") 
+    python_exe = sys.executable.replace("\\", "/")
+
+    # Script per richiamare questo file Python
+    bash_hook = f"""#!/bin/sh
+"{python_exe}" "{script_path}"
+exit $?
+"""
+    try:
+        with open(pre_push_path, "w", encoding="utf-8") as f:
+            f.write(bash_hook)
+        
+        # Aggiunge permessi di esecuzione (necessario per Unix/Git Bash)
+        os.chmod(pre_push_path, os.stat(pre_push_path).st_mode | stat.S_IEXEC)
+        print(f"Hook installato con successo in: {pre_push_path}")
+    except Exception as e:
+        print(f"Errore in fase di scrittura dell'hook: {e}")
+    
+    sys.exit(0)
+
+
+def read_files(file_list):
+    content = ""
+    for file_name in file_list:
+        if not os.path.exists(file_name) or os.path.isdir(file_name):
             continue
         try:
-            with open(nome, "r", encoding="utf-8") as f:
-                testo_accumulato += f"\n\n--- INIZIO FILE: {nome} ---\n"
-                testo_accumulato += f.read()
-                testo_accumulato += f"\n--- FINE FILE: {nome} ---\n"
+            with open(file_name, "r", encoding="utf-8") as f:
+                content += f"\n\n--- FILE: {file_name} ---\n{f.read()}\n"
         except Exception:
             continue
-    return testo_accumulato
+    return content
 
-def rileva_nomi_modificati():
+def get_modified_files():
     try:
-        comando = ['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD']
-        risultato = subprocess.run(comando, capture_output=True, text=True, check=True)
-        nomi = risultato.stdout.strip().split('\n')
-        return [os.path.normpath(n) for n in nomi if n.strip()]
-    except Exception as e:
+        cmd = ['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD']
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        files = res.stdout.strip().split('\n')
+        return [os.path.normpath(f) for f in files if f.strip()]
+    except Exception:
         return []
 
-# --- 2. INTERFACCIA E LOGICA ---
+
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-class AgenteIAApp(ctk.CTk):
+class GitAgentApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("🛡️ AI Git Pre-Push Reviewer")
+        self.title("Git Pre-Push AI Reviewer")
         self.geometry("850x600")
 
-        # Variabili nascoste per ricordare la correzione
-        self.codice_riparato = ""
-        self.file_da_riparare = ""
+        # se l'utente forza la chiusura, facciamo passare il push
+        self.protocol("WM_DELETE_WINDOW", self.bypass_hook)
 
-        # UI Elements
-        self.label_titolo = ctk.CTkLabel(self, text="Revisione Codice Pre-Push", font=ctk.CTkFont(size=22, weight="bold"))
-        self.label_titolo.pack(pady=(20, 10))
+        self.fixed_code = ""
+        self.target_file = ""
 
-        self.textbox_log = ctk.CTkTextbox(self, width=800, height=400)
-        self.textbox_log.pack(pady=10)
+        self.lbl_title = ctk.CTkLabel(self, text="Code Review", font=ctk.CTkFont(size=22, weight="bold"))
+        self.lbl_title.pack(pady=(20, 10))
 
-        # Frame per i bottoni finali
-        self.frame_bottoni = ctk.CTkFrame(self, fg_color="transparent")
-        self.frame_bottoni.pack(pady=20)
+        self.log_box = ctk.CTkTextbox(self, width=800, height=400)
+        self.log_box.pack(pady=10)
 
-        self.btn_approva = ctk.CTkButton(self.frame_bottoni, text="✅ Approva e Pusha", fg_color="green", hover_color="darkgreen", command=self.approva_push, state="disabled")
-        self.btn_approva.grid(row=0, column=0, padx=10)
+        self.btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.btn_frame.pack(pady=20)
 
-        self.btn_blocca = ctk.CTkButton(self.frame_bottoni, text="❌ Blocca Push", fg_color="red", hover_color="darkred", command=self.blocca_push)
-        self.btn_blocca.grid(row=0, column=1, padx=10)
+        self.btn_approve = ctk.CTkButton(self.btn_frame, text="Approva e Pusha", fg_color="green", hover_color="darkgreen", command=self.approve_push, state="disabled")
+        self.btn_approve.grid(row=0, column=0, padx=10)
 
-        self.btn_approva_codice = ctk.CTkButton(self.frame_bottoni, text="✨ Applica Modifiche IA", fg_color="#b8860b", text_color="white", hover_color="#8b6508", command=self.modifica_codice_ia, state="disabled")
-        self.btn_approva_codice.grid(row=0, column=2, padx=10)
+        self.btn_block = ctk.CTkButton(self.btn_frame, text="Blocca Push", fg_color="red", hover_color="darkred", command=self.block_push)
+        self.btn_block.grid(row=0, column=1, padx=10)
 
-        # Avvio automatico immediato all'apertura
-        self.scrivi_log("Hook intercettato! Avvio analisi automatica in corso...")
-        threading.Thread(target=self.esegui_logica_agente).start()
+        self.btn_fix = ctk.CTkButton(self.btn_frame, text="Visualizza Diff e Applica", fg_color="#b8860b", text_color="white", hover_color="#8b6508", command=self.show_diff_viewer, state="disabled")
+        self.btn_fix.grid(row=0, column=2, padx=10)
 
-    def scrivi_log(self, testo):
-        self.textbox_log.insert("end", testo + "\n")
-        self.textbox_log.see("end")
+        self.log("Avvio analisi automatica del commit...")
+        threading.Thread(target=self.run_agent_logic, daemon=True).start()
 
-    # --- COMANDI PER I BOTTONI ---
-    def approva_push(self):
-        self.scrivi_log("Push approvato. Chiusura app...")
+    def log(self, text):
+        self.log_box.insert("end", text + "\n")
+        self.log_box.see("end")
+
+    def approve_push(self):
         self.destroy()
-        os._exit(0) # 0 = Via libera a Git
+        os._exit(0)
 
-    def blocca_push(self):
-        self.scrivi_log("Push bloccato. Chiusura app...")
+    def block_push(self):
         self.destroy()
-        os._exit(1) # 1 = Ferma Git
+        os._exit(1)
 
-    def modifica_codice_ia(self):
-        if not self.codice_riparato or not self.file_da_riparare:
-            self.scrivi_log("❌ Impossibile riparare: Dati non trovati in memoria.")
+    def bypass_hook(self):
+        self.destroy()
+        os._exit(0)
+
+    def show_diff_viewer(self):
+        if not self.fixed_code or not self.target_file:
             return
 
         try:
-            # Sovrascrive il file originale con la versione corretta dell'IA
-            with open(self.file_da_riparare, "w", encoding="utf-8") as f:
-                f.write(self.codice_riparato)
-            
-            self.scrivi_log(f"\n✨ MAGIA APPLICATA! Il file {self.file_da_riparare} è stato sovrascritto.")
-            self.scrivi_log("⚠️ ATTENZIONE: Questo push DEVE essere bloccato perché Git stava spedendo il codice vecchio.")
-            self.scrivi_log("👉 Clicca su '❌ Blocca Push'. Poi nel terminale fai: 'git add .', poi 'git commit -m \"Fix IA\"', e infine riprova a pushare.")
-            
-            # Blocca gli altri bottoni per evitare disastri
-            self.btn_approva_codice.configure(state="disabled")
-            self.btn_approva.configure(state="disabled")
-            
-        except Exception as e:
-            self.scrivi_log(f"❌ Errore durante il salvataggio: {e}")
+            with open(self.target_file, "r", encoding="utf-8") as f:
+                old_code = f.readlines()
+        except Exception:
+            old_code = []
 
-    # --- LOGICA DELL'AGENTE ---
-    def esegui_logica_agente(self):
+        new_code = self.fixed_code.splitlines(keepends=True)
+        diff_output = "".join(difflib.unified_diff(old_code, new_code, fromfile='Current', tofile='AI Proposal'))
+
+        popup = ctk.CTkToplevel(self)
+        popup.title("Diff Viewer")
+        popup.geometry("700x500")
+        
+        txt = ctk.CTkTextbox(popup, width=650, height=350, font=("Courier", 12))
+        txt.pack(pady=20)
+        txt.insert("0.0", diff_output if diff_output else "Nessuna differenza strutturale.")
+        
+        def apply_changes():
+            with open(self.target_file, "w", encoding="utf-8") as f:
+                f.write(self.fixed_code)
+            self.log(f"File {self.target_file} aggiornato. Blocca il push e fai un nuovo commit.")
+            self.btn_approve.configure(state="disabled")
+            self.btn_fix.configure(state="disabled")
+            popup.destroy()
+
+        ctk.CTkButton(popup, text="Applica", fg_color="green", command=apply_changes).pack(side="left", padx=50, pady=10)
+        ctk.CTkButton(popup, text="Annulla", fg_color="gray", command=popup.destroy).pack(side="right", padx=50, pady=10)
+
+    def run_agent_logic(self):
         try:
-            KEY = os.getenv('GOOGLE_API_KEY')
-            if not KEY:
-                self.scrivi_log("❌ ERRORE: Chiave API mancante.")
+            api_key = os.getenv('GOOGLE_API_KEY')
+            if not api_key:
+                self.log("Errore: GOOGLE_API_KEY non trovata nell'ambiente.")
                 return
 
-            self.scrivi_log("Cerco i file modificati da pushare...")
-            nomi_cambiati = rileva_nomi_modificati()
-
-            if not nomi_cambiati:
-                self.scrivi_log("Nessun file rilevato. Puoi approvare il push.")
-                self.btn_approva.configure(state="normal")
+            modified_files = get_modified_files()
+            if not modified_files:
+                self.btn_approve.configure(state="normal")
                 return
 
-            self.scrivi_log(f"File rilevati: {nomi_cambiati}")
-            codice_target = leggi_contenuto_file(nomi_cambiati)
+            valid_extensions = ('.py', '.dart', '.swift', '.js', '.ts', '.java', '.go', '.cpp', '.c', '.cs')
+            target_files = [f for f in modified_files if f.endswith(valid_extensions)]
 
-            client = genai.Client(api_key=KEY)
+            if not target_files:
+                self.btn_approve.configure(state="normal")
+                return
+
+            self.target_file = target_files[0]
+            source_code = read_files([self.target_file])
+
+            client = genai.Client(api_key=api_key)
             prompt = (
-                "Sei un Senior Software Engineer. Stai analizzando un codice prima del push.\n\n"
-                f"CODICE:\n{codice_target}\n\n"
-                "Istruzioni TASSATIVE:\n"
-                "1. Scrivi ## ANALISI DELL'ERRORE (max 3 righe).\n"
-                "2. Scrivi ## CODICE CORRETTO in markdown.\n"
-                "3. Scrivi ## UNIT TEST in markdown.\n"
-                "4. Fornisci queste TRE righe esatte alla fine del testo:\n"
-                "   DEPENDENCIES: [nomi dei pacchetti da installare via pip, es. pytest requests. Scrivi NONE se non serve nulla]\n"
-                "   TEST_FILE_NAME: [nome file test]\n"
-                "   RUN_COMMAND: [comando test]\n"
+                "Sei un Code Reviewer automatizzato. Analizza questo codice:\n\n"
+                f"FILE: {self.target_file}\n\nCODICE:\n{source_code}\n\n"
+                "REGOLE:\n"
+                "1. Identifica il linguaggio e trova falle logiche reali. Ignora stile o formattazione.\n"
+                "2. Se trovi un bug: fornisci ## ANALISI DELL'ERRORE, ## CODICE CORRETTO e ## UNIT TEST.\n"
+                "3. Se non ci sono bug: scrivi 'Nessun bug' e un semplice UNIT TEST che passi con il codice attuale.\n"
+                "4. Termina tassativamente con:\n"
+                "   DEPENDENCIES: [pacchetti o NONE]\n"
+                "   TEST_FILE_NAME: [nome file]\n"
+                "   RUN_COMMAND: [comando di test]\n"
             )
             
-            self.scrivi_log("Inoltro codice a Gemini...")
+            self.log(f"Analisi di {self.target_file} in corso...")
             response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
-            self.scrivi_log("✅ Risposta ricevuta!")
-
-            with open("REPORT_AGENTE_IA.md", "w", encoding="utf-8") as report:
+            
+            # Salvataggio report per debugging
+            with open("REVIEW_REPORT.md", "w", encoding="utf-8") as report:
                 report.write(response.text)
 
-            # --- ESTRAZIONE DELLA CORREZIONE AUTOMATICA ---
-            match_correzione = re.search(r"## CODICE CORRETTO.*?```[^\n]*\n(.*?)\n```", response.text, re.DOTALL)
-            
-            # Se trova il codice corretto, lo tiene in memoria e lo stampa a schermo
-            if match_correzione and len(nomi_cambiati) == 1:
-                self.codice_riparato = match_correzione.group(1).strip()
-                self.file_da_riparare = nomi_cambiati[0]
-                self.scrivi_log("\n" + "="*50)
-                self.scrivi_log("💡 L'IA HA PREPARATO UNA SOLUZIONE:\n")
-                self.scrivi_log(self.codice_riparato)
-                self.scrivi_log("="*50 + "\n")
+            # Parsing della risposta
+            match_code = re.search(r"## CODICE CORRETTO.*?```[^\n]*\n(.*?)\n```", response.text, re.DOTALL)
+            if match_code: 
+                self.fixed_code = match_code.group(1).strip()
 
-            # --- ESTRAZIONE DATI TEST ---
-            deps_match = re.search(r"DEPENDENCIES:\s*(.*)", response.text)
-            test_file_match = re.search(r"TEST_FILE_NAME:\s*(\S+)", response.text)
-            run_command_match = re.search(r"RUN_COMMAND:\s*(.*)", response.text)
+            cmd_match = re.search(r"RUN_COMMAND:\s*(.*)", response.text)
+            t_file_match = re.search(r"TEST_FILE_NAME:\s*(\S+)", response.text)
 
-            if deps_match and test_file_match and run_command_match:
-                dipendenze = deps_match.group(1).strip()
-                test_file_name = test_file_match.group(1).strip()
-                run_command = run_command_match.group(1).strip()
-
-                if dipendenze.upper() != "NONE" and dipendenze != "":
-                    self.scrivi_log(f"📦 Installazione dipendenze: {dipendenze}...")
-                    subprocess.run(f"pip install {dipendenze}", shell=True, capture_output=True)
-                    self.scrivi_log("✅ Dipendenze installate.")
-
-                blocchi_codice = re.findall(r"```[^\n]*\n(.*?)\n```", response.text, re.DOTALL)
-                if blocchi_codice:
-                    codice_test = blocchi_codice[-1]
-                    with open(test_file_name, "w", encoding="utf-8") as f:
-                        f.write(codice_test)
+            if cmd_match and t_file_match:
+                cmd = cmd_match.group(1).strip()
+                t_file = t_file_match.group(1).strip()
+                
+                blocks = re.findall(r"```[^\n]*\n(.*?)\n```", response.text, re.DOTALL)
+                if blocks:
+                    with open(t_file, "w", encoding="utf-8") as f: 
+                        f.write(blocks[-1])
                     
-                    self.scrivi_log(f"🧪 Esecuzione test: {run_command} ...")
-                    risultato = subprocess.run(run_command, shell=True, capture_output=True, text=True)
-                    
-                    # LA LOGICA CORRETTA DEL BOTTONE GIALLO E' QUI SOTTO:
-                    if risultato.returncode == 0:
-                        self.scrivi_log("✅ TEST PASSATO! Il codice originale non aveva bug. È sicuro da pushare.")
-                        self.btn_approva.configure(state="normal")
+                    self.log(f"Avvio test suite: {cmd}")
+                    # Usa l'interprete corrente se è pytest per evitare conflitti di ambiente
+                    exec_cmd = f"{sys.executable} -m {cmd}" if cmd.startswith("pytest") else cmd
+                    res = subprocess.run(exec_cmd, shell=True, capture_output=True, text=True)
+
+                    if res.returncode == 0:
+                        self.log("Test passati con successo. Ready to push.")
+                        self.btn_approve.configure(state="normal")
                     else:
-                        self.scrivi_log("❌ TEST FALLITO! È stato rilevato un bug nel tuo codice attuale.")
-                        self.scrivi_log(f"Dettaglio:\n{risultato.stdout.strip()}")
-                        
-                        # Il test è fallito. Se l'IA ha scritto una correzione, accendiamo il bottone giallo!
-                        if self.codice_riparato:
-                            self.scrivi_log("\n👉 Premi il bottone 'Applica Modifiche IA' per correggere il file.")
-                            self.btn_approva_codice.configure(state="normal")
+                        self.log("Test falliti. Verifica i log o accetta la patch proposta.")
+                        if self.fixed_code: 
+                            self.btn_fix.configure(state="normal")
 
-        except Exception as e:
-            self.scrivi_log(f"❌ Errore critico: {e}")
-        finally:
-            self.scrivi_log("\n👉 Operazione terminata. Usa i bottoni in basso per decidere.")
+        except Exception as e: 
+            self.log(f"Eccezione non gestita: {e}")
 
 if __name__ == "__main__":
-    app = AgenteIAApp()
+    app = GitAgentApp()
     app.mainloop()
