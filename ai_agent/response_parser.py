@@ -8,7 +8,7 @@ class ResponseParserMixin:
         try:
             data = json.loads(response_text)
         except json.JSONDecodeError as exc:
-            return "failed", "Risposta AI non è JSON valido: " + str(exc)
+            return "failed", "Risposta AI non e JSON valido: " + str(exc)
 
         required_fields = ("has_bug", "analysis", "test_code", "test_file_name", "run_command")
         for field in required_fields:
@@ -23,14 +23,38 @@ class ResponseParserMixin:
         cmd = data["run_command"]
         t_file = data["test_file_name"]
 
+        if not isinstance(data["analysis"], str):
+            return "failed", "JSON incoerente: analysis deve essere una stringa."
+
+        if fixed_code is not None and not isinstance(fixed_code, str):
+            return "failed", "JSON incoerente: fixed_code deve essere una stringa oppure null."
+
+        if not isinstance(test_code, str):
+            return "failed", "JSON incoerente: test_code deve essere una stringa."
+
+        if not isinstance(t_file, str) or not t_file.strip():
+            return "failed", "JSON incoerente: test_file_name deve essere una stringa non vuota."
+
+        if not isinstance(cmd, str) or not cmd.strip():
+            return "failed", "JSON incoerente: run_command deve essere una stringa non vuota."
+
+        test_code = self._strip_code_fence(test_code)
+        if isinstance(fixed_code, str):
+            fixed_code = self._strip_code_fence(fixed_code)
+
+        data["test_code"] = test_code
+        if fixed_code is not None:
+            data["fixed_code"] = fixed_code
+        response_text = json.dumps(data, ensure_ascii=False)
+
         if data["has_bug"] and not str(fixed_code or "").strip():
             return (
                 "failed",
-                "JSON incoerente: has_bug è true ma fixed_code è assente. Rigenera la risposta.",
+                "JSON incoerente: has_bug e true ma fixed_code e assente. Rigenera la risposta.",
             )
 
         if not str(test_code or "").strip():
-            return "failed", "JSON incoerente: test_code è vuoto."
+            return "failed", "JSON incoerente: test_code e vuoto."
 
         if any(operator in str(cmd) for operator in ("&&", "||", ";", "|")):
             return "failed", "run_command contiene operatori shell non consentiti."
@@ -73,6 +97,24 @@ class ResponseParserMixin:
             return "bug", ""
 
         return "failed", err_log
+
+    @staticmethod
+    def _strip_code_fence(value: str) -> str:
+        cleaned = value.strip().lstrip("\ufeff")
+
+        if cleaned.startswith("```"):
+            lines = cleaned.splitlines()
+            if lines:
+                lines = lines[1:]
+            cleaned = "\n".join(lines).strip()
+
+        if cleaned.endswith("```"):
+            lines = cleaned.splitlines()
+            if lines:
+                lines = lines[:-1]
+            cleaned = "\n".join(lines).strip()
+
+        return cleaned.lstrip("\ufeff")
 
     def _find_removed_instance_state(self, candidate_code: str) -> str:
         if not self.target_file or self.target_file.suffix.lower() != ".py":

@@ -23,6 +23,7 @@ class GenAIClient:
         error_feedback: str = "",
     ) -> str:
         prompt = self._build_prompt(target_file, source_code, context_code, error_feedback)
+        last_json_error: ValueError | None = None
 
         for model_name in self.MODELS:
             print(f"[API] Connessione al modello: {model_name}")
@@ -32,8 +33,10 @@ class GenAIClient:
                     raw_text = (response.text or "").strip()
                     cleaned = self._clean_json_response(raw_text)
                     return cleaned
-                except ValueError:
-                    raise
+                except ValueError as exc:
+                    last_json_error = exc
+                    print(f"[API] Risposta JSON non valida da {model_name}: {exc}")
+                    break
                 except Exception as exc:
                     err = str(exc)
                     if isinstance(exc, TimeoutError):
@@ -52,6 +55,9 @@ class GenAIClient:
 
                     print(f"[API] Errore su {model_name}: {exc}")
                     break
+
+        if last_json_error:
+            raise last_json_error
 
         raise RuntimeError(
             "Nessun modello Gemini disponibile. Controllare connessione e API key."
@@ -86,12 +92,12 @@ class GenAIClient:
                     return candidate
                 except json.JSONDecodeError as second_error:
                     raise ValueError(
-                        "Risposta AI non è JSON valido dopo pulizia: "
+                        "Risposta AI non e JSON valido dopo pulizia: "
                         + str(second_error)
                     ) from second_error
 
             raise ValueError(
-                "Risposta AI non è JSON valido dopo pulizia: "
+                "Risposta AI non e JSON valido dopo pulizia: "
                 + str(first_error)
             ) from first_error
 
@@ -142,10 +148,12 @@ class GenAIClient:
             "3. Non introdurre logiche temporali, calendario o reset giornaliero se non sono gia presenti nel codice originale.",
             "4. I test devono verificare solo il comportamento documentato dal codice target, non requisiti inventati.",
             "5. Non rimuovere campi, attributi o variabili di stato gia presenti se partecipano al comportamento esistente.",
+            "6. Se proponi fixed_code, deve contenere l'intero file target corretto, non solo il frammento modificato.",
+            "7. Se il bug riguarda un limite cumulativo, usa lo stato cumulativo gia presente invece di cambiare il significato del limite.",
         ]
         if is_python:
             patch_rules.append(
-                "6. Per Python, non rimuovere attributi self.* gia presenti: se esiste self.withdrawn_today, preservalo e usalo per la validazione cumulativa."
+                "8. Per Python, non rimuovere attributi self.* gia presenti: se esiste self.withdrawn_today, preservalo e usalo per la validazione cumulativa."
             )
 
         test_rules = [
@@ -165,24 +173,43 @@ class GenAIClient:
             "10. Non impostare manualmente i contatori finali: Passed e Failed devono derivare dai casi eseguiti.",
             "11. Non usare frasi o commenti come manual analysis, assumo, simuliamo il conteggio o valori manuali.",
             "12. Non usare operatori di shell come &&, || o ; nel campo run_command: indica un comando diretto e semplice.",
+            "13. Usa almeno 3 casi di test reali: un caso positivo, un errore atteso e un caso limite o cumulativo rilevante.",
+            "14. Se il bug riguarda stato cumulativo, esegui almeno due operazioni consecutive sullo stesso oggetto.",
+            "15. Il test deve continuare a eseguire tutti i casi anche quando un caso fallisce; stampa le metriche solo alla fine.",
+            "16. Se usi un helper assert con callback o lambda, controlla davvero il valore restituito dalla callback.",
+            "17. In fixed_code e test_code scrivi codice reale eseguibile, non pseudocodice, placeholder o spiegazioni.",
         ]
         if is_python:
             test_rules.extend(
                 [
-                    "13. Vincoli specifici Python: niente unittest, pytest, classi di test o decorator.",
-                    "14. Vincoli specifici Python: non usare assert dentro lambda; in Python e SyntaxError.",
-                    "15. Vincoli specifici Python: non catturare o sostituire sys.stdout e non usare StringIO; stampa direttamente su console.",
-                    "16. Vincoli specifici Python: non mescolare argomenti posizionali dopo keyword argument.",
-                    "17. Non proporre comandi distruttivi o comandi che non eseguono il test.",
+                    "18. Vincoli specifici Python: niente unittest, pytest, classi di test o decorator.",
+                    "19. Vincoli specifici Python: non usare assert dentro lambda; in Python e SyntaxError.",
+                    "20. Vincoli specifici Python: non catturare o sostituire sys.stdout e non usare StringIO; stampa direttamente su console.",
+                    "21. Vincoli specifici Python: non mescolare argomenti posizionali dopo keyword argument.",
+                    "22. Non proporre comandi distruttivi o comandi che non eseguono il test.",
                 ]
             )
         else:
-            test_rules.append("13. Non proporre comandi distruttivi o comandi che non eseguono il test.")
+            test_rules.append("18. Non proporre comandi distruttivi o comandi che non eseguono il test.")
             if target_ext == ".java":
                 test_rules.extend(
                     [
-                        "14. Vincoli specifici Java: la classe di test deve contenere una sola public static void main(String[] args).",
-                        "15. Vincoli specifici Java: non duplicare il metodo main e non inserire codice fuori dalla classe pubblica.",
+                        "19. Vincoli specifici Java: la classe di test deve contenere una sola public static void main(String[] args).",
+                        "20. Vincoli specifici Java: non duplicare il metodo main e non inserire codice fuori dalla classe pubblica.",
+                    ]
+                )
+            elif target_ext in (".c", ".cpp"):
+                test_rules.extend(
+                    [
+                        "19. Vincoli specifici C/C++: il test deve contenere un solo main.",
+                        "20. Vincoli specifici C/C++: non includere direttamente il file target se il runner lo compila insieme al test; dichiara solo i prototipi necessari.",
+                    ]
+                )
+            elif target_ext == ".cs":
+                test_rules.extend(
+                    [
+                        "19. Vincoli specifici C#: il test deve contenere un solo entry point static Main.",
+                        "20. Vincoli specifici C#: non usare pacchetti NuGet o framework esterni.",
                     ]
                 )
 
@@ -203,6 +230,10 @@ class GenAIClient:
             + "\n\n"
             "Rispondi ESCLUSIVAMENTE con un oggetto JSON valido. "
             "Nessun testo prima o dopo. Nessun blocco markdown. Nessun backtick. "
+            "La risposta deve essere accettata da json.loads senza correzioni manuali. "
+            "Le stringhe multilinea devono usare \\n dentro la stringa JSON. "
+            "Non inserire virgolette non escapate dentro fixed_code o test_code. "
+            "Non usare virgole finali. Usa null JSON, non la stringa \"null\". "
             "La struttura deve essere esattamente questa:\n"
             "{\n"
             '  "has_bug": true,\n'
@@ -213,8 +244,13 @@ class GenAIClient:
             '  "run_command": "comando diretto senza operatori shell"\n'
             "}\n"
             "Il campo has_bug deve essere true se trovi un bug, altrimenti false.\n"
-            "Se has_bug è false, fixed_code deve essere null.\n"
-            "Se has_bug è true, fixed_code deve contenere il file completo corretto.\n"
+            "Se has_bug e false, fixed_code deve essere null.\n"
+            "Se has_bug e true, fixed_code deve contenere il file completo corretto.\n"
+        )
+
+        prompt += (
+            "test_file_name deve avere estensione coerente con il linguaggio del test.\n"
+            "run_command deve essere un comando diretto, ad esempio python test.py, node test.js, tsx test.ts, java NomeTest o dart test.dart.\n"
         )
 
         if error_feedback:
@@ -222,7 +258,7 @@ class GenAIClient:
                 "\n\n[FEEDBACK ESECUZIONE PRECEDENTE]\n"
                 "Il test precedente non e stato eseguibile o non ha rispettato il formato.\n"
                 "Correggi risposta, test o patch mantenendo i vincoli sopra.\n"
-                f"Output ricevuto:\n```\n{error_feedback}\n```\n"
+                f"Output ricevuto:\n--- inizio output ---\n{error_feedback}\n--- fine output ---\n"
             )
 
         return prompt

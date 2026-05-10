@@ -20,7 +20,7 @@ class TestRunnerMixin:
             data = json.loads(response_text)
             test_code = data.get("test_code")
             if isinstance(test_code, str):
-                return test_code.strip()
+                return self._strip_code_fence(test_code)
         except json.JSONDecodeError:
             pass
 
@@ -82,6 +82,12 @@ class TestRunnerMixin:
 
         if target_ext == ".java":
             return self._run_java_test(test_code, safe_name)
+        if target_ext == ".c":
+            return self._run_c_test(test_code, safe_name)
+        if target_ext == ".cpp":
+            return self._run_cpp_test(test_code, safe_name)
+        if target_ext == ".cs":
+            return self._run_csharp_test(test_code, safe_name)
 
         test_path = self._make_temp_test_path(safe_name)
         try:
@@ -142,6 +148,14 @@ class TestRunnerMixin:
         try:
             if not shutil.which("javac"):
                 return self._record_test_failure("javac non trovato. Installa Java Development Kit (JDK).")
+            if not shutil.which("java"):
+                return self._record_test_failure("java non trovato. Installa Java Runtime Environment (JRE).")
+            javac_error = self._check_runtime(["javac", "-version"], "javac non risponde correttamente.")
+            if javac_error:
+                return self._record_test_failure(javac_error)
+            java_error = self._check_runtime(["java", "-version"], "java non risponde correttamente.")
+            if java_error:
+                return self._record_test_failure(java_error)
 
             temp_dir.mkdir(parents=True, exist_ok=False)
             test_path.write_text(test_code, encoding="utf-8")
@@ -178,6 +192,215 @@ class TestRunnerMixin:
         finally:
             self._cleanup_path(temp_dir)
 
+    def _run_c_test(self, test_code: str, safe_name: str) -> Tuple[str, str]:
+        return self._run_native_compiled_test(
+            test_code=test_code,
+            safe_name=safe_name,
+            compiler="gcc",
+            compiler_name="gcc",
+            compiler_args=["-std=c11", "-Wall", "-Wextra"],
+            missing_message="gcc non trovato. Installa GCC.",
+        )
+
+    def _run_cpp_test(self, test_code: str, safe_name: str) -> Tuple[str, str]:
+        return self._run_native_compiled_test(
+            test_code=test_code,
+            safe_name=safe_name,
+            compiler="g++",
+            compiler_name="g++",
+            compiler_args=["-std=c++17", "-Wall", "-Wextra"],
+            missing_message="g++ non trovato. Installa un compilatore C++.",
+        )
+
+    def _run_native_compiled_test(
+        self,
+        test_code: str,
+        safe_name: str,
+        compiler: str,
+        compiler_name: str,
+        compiler_args: List[str],
+        missing_message: str,
+    ) -> Tuple[str, str]:
+        if not self.target_file:
+            return self._record_test_failure("File target non impostato.")
+
+        if not shutil.which(compiler):
+            return self._record_test_failure(missing_message)
+        compiler_error = self._check_runtime([compiler, "--version"], f"{compiler} non risponde correttamente.")
+        if compiler_error:
+            return self._record_test_failure(compiler_error)
+
+        temp_dir = self.repo_root / f".ai_agent_native_{uuid.uuid4().hex}"
+        test_path = temp_dir / safe_name
+        exe = temp_dir / ("AiAgentTest.exe" if os.name == "nt" else "AiAgentTest")
+        try:
+            temp_dir.mkdir(parents=True, exist_ok=False)
+            test_path.write_text(test_code, encoding="utf-8")
+
+            compile_res = run_process(
+                [compiler_name] + compiler_args + [str(self.target_file.resolve()), str(test_path), "-o", str(exe)],
+                cwd=self.repo_root,
+                timeout=TEST_TIMEOUT_SECONDS,
+            )
+            if compile_res.returncode != 0:
+                output = (compile_res.stdout + "\n" + compile_res.stderr).strip()
+                return self._record_test_failure(output or "Compilazione test nativa non riuscita.")
+
+            run_res = run_process([str(exe)], cwd=self.repo_root, timeout=TEST_TIMEOUT_SECONDS)
+            return self._handle_test_process_result(run_res)
+        except subprocess.TimeoutExpired:
+            return self._record_test_failure(f"Timeout: il test ha superato {TEST_TIMEOUT_SECONDS} secondi.")
+        except Exception as exc:
+            return self._record_test_failure(f"Esecuzione test nativo non riuscita: {exc}")
+        finally:
+            self._cleanup_path(temp_dir)
+
+    def _run_csharp_test(self, test_code: str, safe_name: str) -> Tuple[str, str]:
+        if not self.target_file:
+            return self._record_test_failure("File target non impostato.")
+
+        if shutil.which("csc"):
+            return self._run_csharp_with_csc(test_code, safe_name)
+
+        if shutil.which("dotnet"):
+            sdk_error = self._check_dotnet_sdk()
+            if sdk_error:
+                return self._record_test_failure(sdk_error)
+            return self._run_csharp_with_dotnet(test_code, safe_name)
+
+        return self._record_test_failure("Nessun runtime C# trovato. Installa .NET SDK o csc.")
+
+    @staticmethod
+    def _check_dotnet_sdk() -> str:
+        try:
+            res = run_process(["dotnet", "--list-sdks"], timeout=10)
+        except Exception as exc:
+            return f"Impossibile verificare .NET SDK: {exc}"
+
+        if res.returncode != 0 or not res.stdout.strip():
+            return "dotnet trovato ma nessun SDK .NET disponibile. Installa .NET SDK."
+
+        return ""
+
+    def _run_csharp_with_csc(self, test_code: str, safe_name: str) -> Tuple[str, str]:
+        if not self.target_file:
+            return self._record_test_failure("File target non impostato.")
+
+        temp_dir = self.repo_root / f".ai_agent_csharp_{uuid.uuid4().hex}"
+        test_path = temp_dir / safe_name
+        exe = temp_dir / "AiAgentCSharpTest.exe"
+        try:
+            csc_error = self._check_runtime(["csc", "/help"], "csc non risponde correttamente.")
+            if csc_error:
+                return self._record_test_failure(csc_error)
+
+            temp_dir.mkdir(parents=True, exist_ok=False)
+            test_path.write_text(test_code, encoding="utf-8")
+
+            compile_res = run_process(
+                ["csc", "/nologo", f"/out:{exe}", str(self.target_file.resolve()), str(test_path)],
+                cwd=self.repo_root,
+                timeout=TEST_TIMEOUT_SECONDS,
+            )
+            if compile_res.returncode != 0:
+                output = (compile_res.stdout + "\n" + compile_res.stderr).strip()
+                return self._record_test_failure(output or "Compilazione C# non riuscita.")
+
+            run_res = run_process([str(exe)], cwd=self.repo_root, timeout=TEST_TIMEOUT_SECONDS)
+            return self._handle_test_process_result(run_res)
+        except subprocess.TimeoutExpired:
+            return self._record_test_failure(f"Timeout: il test ha superato {TEST_TIMEOUT_SECONDS} secondi.")
+        except Exception as exc:
+            return self._record_test_failure(f"Esecuzione test C# non riuscita: {exc}")
+        finally:
+            self._cleanup_path(temp_dir)
+
+    def _run_csharp_with_dotnet(self, test_code: str, safe_name: str) -> Tuple[str, str]:
+        if not self.target_file:
+            return self._record_test_failure("File target non impostato.")
+
+        temp_dir = self.repo_root / f".ai_agent_csharp_{uuid.uuid4().hex}"
+        try:
+            target_framework = self._dotnet_target_framework()
+            if not target_framework:
+                return self._record_test_failure("Impossibile determinare il TargetFramework .NET disponibile.")
+
+            temp_dir.mkdir(parents=True, exist_ok=False)
+            (temp_dir / self.target_file.name).write_text(
+                self.target_file.read_text(encoding="utf-8-sig"),
+                encoding="utf-8",
+            )
+            (temp_dir / safe_name).write_text(test_code, encoding="utf-8")
+            (temp_dir / "AiAgentCSharpTest.csproj").write_text(
+                (
+                    '<Project Sdk="Microsoft.NET.Sdk">\n'
+                    "  <PropertyGroup>\n"
+                    "    <OutputType>Exe</OutputType>\n"
+                    f"    <TargetFramework>{target_framework}</TargetFramework>\n"
+                    "    <ImplicitUsings>disable</ImplicitUsings>\n"
+                    "    <Nullable>disable</Nullable>\n"
+                    "  </PropertyGroup>\n"
+                    "</Project>\n"
+                ),
+                encoding="utf-8",
+            )
+
+            run_res = run_process(
+                ["dotnet", "run", "--project", str(temp_dir / "AiAgentCSharpTest.csproj")],
+                cwd=temp_dir,
+                timeout=TEST_TIMEOUT_SECONDS,
+            )
+            return self._handle_test_process_result(run_res)
+        except subprocess.TimeoutExpired:
+            return self._record_test_failure(f"Timeout: il test ha superato {TEST_TIMEOUT_SECONDS} secondi.")
+        except Exception as exc:
+            return self._record_test_failure(f"Esecuzione test C# non riuscita: {exc}")
+        finally:
+            self._cleanup_path(temp_dir)
+
+    @staticmethod
+    def _dotnet_target_framework() -> str:
+        try:
+            res = run_process(["dotnet", "--list-sdks"], timeout=10)
+        except Exception:
+            return ""
+
+        versions = []
+        for line in res.stdout.splitlines():
+            match = re.match(r"(\d+)\.(\d+)", line.strip())
+            if match:
+                versions.append((int(match.group(1)), int(match.group(2))))
+
+        if not versions:
+            return ""
+
+        major, minor = max(versions)
+        if major >= 5:
+            return f"net{major}.0"
+        if major == 3:
+            return "netcoreapp3.1"
+        if major == 2:
+            return "netcoreapp2.1"
+        return f"net{major}.{minor}"
+
+    @staticmethod
+    def _strip_code_fence(value: str) -> str:
+        cleaned = value.strip().lstrip("\ufeff")
+
+        if cleaned.startswith("```"):
+            lines = cleaned.splitlines()
+            if lines:
+                lines = lines[1:]
+            cleaned = "\n".join(lines).strip()
+
+        if cleaned.endswith("```"):
+            lines = cleaned.splitlines()
+            if lines:
+                lines = lines[:-1]
+            cleaned = "\n".join(lines).strip()
+
+        return cleaned.lstrip("\ufeff")
+
     @staticmethod
     def _extract_java_public_class(test_code: str) -> Optional[str]:
         match = re.search(r"\bpublic\s+class\s+([A-Za-z_$][A-Za-z0-9_$]*)", test_code)
@@ -185,12 +408,23 @@ class TestRunnerMixin:
 
     @staticmethod
     def _validate_java_test_structure(test_code: str) -> str:
+        if not TestRunnerMixin._extract_java_public_class(test_code):
+            return (
+                "Test Java non valido: manca una classe public. "
+                "Genera una classe public con una sola public static void main(String[] args)."
+            )
+
         main_count = len(
             re.findall(
-                r"\bpublic\s+static\s+void\s+main\s*\(\s*String\s*\[\]\s+\w+\s*\)",
+                r"\bpublic\s+static\s+void\s+main\s*\(\s*(?:String\s*\[\]\s+\w+|String\s+\w+\s*\[\])\s*\)",
                 test_code,
             )
         )
+        if main_count == 0:
+            return (
+                "Test Java non valido: manca il metodo main. "
+                "Genera una sola public static void main(String[] args) e chiama li tutti i casi."
+            )
         if main_count > 1:
             return (
                 "Test Java non valido: la classe di test contiene piu metodi main. "
@@ -295,6 +529,26 @@ class TestRunnerMixin:
             if any(re.search(pattern, test_code, re.IGNORECASE) for pattern in suspicious_assignments):
                 return "Test non valido: i contatori finali non devono essere hardcoded."
 
+        if target_ext in (".js", ".ts"):
+            assert_helper = re.search(
+                r"function\s+assert\s*\(\s*(\w+)\s*,.*?\)\s*\{(?P<body>.*?)\n\}",
+                test_code,
+                re.DOTALL,
+            )
+            if assert_helper:
+                callback_name = re.escape(assert_helper.group(1))
+                body = assert_helper.group("body")
+                ignored_callback = re.search(
+                    rf"\b{callback_name}\s*\(\s*\)\s*;\s*console\.(?:log|error)\s*\(\s*`?\[PASS\]",
+                    body,
+                    re.DOTALL,
+                )
+                if ignored_callback:
+                    return (
+                        "Test non valido: l'helper assert chiama la callback ma ignora il valore restituito. "
+                        "Controlla esplicitamente il risultato prima di stampare [PASS]."
+                    )
+
         return ""
 
     def _find_shadowed_target_symbols(self, test_code: str) -> str:
@@ -380,10 +634,13 @@ class TestRunnerMixin:
             if self.target_file:
                 ext = {
                     ".js": ".js",
-                    ".ts": ".js",
+                    ".ts": ".ts",
                     ".dart": ".dart",
                     ".swift": ".swift",
                     ".java": ".java",
+                    ".c": ".c",
+                    ".cpp": ".cpp",
+                    ".cs": ".cs",
                 }.get(self.target_file.suffix.lower(), ".py")
             base = f"test_ai_fix{ext}"
 
@@ -413,19 +670,31 @@ class TestRunnerMixin:
 
         if target_ext == ".ts":
             if shutil.which("tsx"):
+                runtime_error = self._check_runtime(["tsx", "--version"], "tsx non risponde correttamente.")
+                if runtime_error:
+                    return [], runtime_error, []
                 return ["tsx", str(test_path)], "", []
             if shutil.which("ts-node"):
+                runtime_error = self._check_runtime(["ts-node", "--version"], "ts-node non risponde correttamente.")
+                if runtime_error:
+                    return [], runtime_error, []
                 return ["ts-node", str(test_path)], "", []
             return [], "Nessun runtime TypeScript trovato. Installa tsx con: npm install -g tsx", []
 
         if target_ext == ".js" or executable == "node":
             if not shutil.which("node"):
                 return [], "node non trovato. Installa Node.js.", []
+            runtime_error = self._check_runtime(["node", "--version"], "node non risponde correttamente.")
+            if runtime_error:
+                return [], runtime_error, []
             return ["node", str(test_path)], "", []
 
         if target_ext == ".dart" or executable == "dart":
             if not shutil.which("dart"):
                 return [], "dart non trovato. Installa il Dart SDK.", []
+            runtime_error = self._check_runtime(["dart", "--version"], "dart non utilizzabile. Installa il Dart SDK.")
+            if runtime_error:
+                return [], runtime_error, []
             return ["dart", str(test_path)], "", []
 
         if target_ext == ".swift":
@@ -447,6 +716,23 @@ class TestRunnerMixin:
             return shlex.split(cmd, posix=(os.name != "nt"))
         except ValueError:
             return []
+
+    @staticmethod
+    def _check_runtime(args: List[str], fallback_message: str) -> str:
+        try:
+            res = run_process(args, timeout=5)
+        except FileNotFoundError:
+            return fallback_message
+        except subprocess.TimeoutExpired:
+            return fallback_message
+        except Exception as exc:
+            return f"Impossibile eseguire {args[0]}: {exc}"
+
+        if res.returncode != 0:
+            output = (res.stdout + "\n" + res.stderr).strip()
+            return output or fallback_message
+
+        return ""
 
     def _compile_swift(self, test_path: Path) -> Tuple[List[str], str, List[Path]]:
         if not self.target_file:

@@ -115,7 +115,7 @@ class AgentWorkflowMixin:
                         llm_status = "Test non eseguibile"
                         if err_log and any(
                             marker in err_log
-                            for marker in ("non è JSON valido", "JSON incompleto", "JSON incoerente")
+                            for marker in ("non e JSON valido", "JSON incompleto", "JSON incoerente")
                         ):
                             error_feedback = (
                                 "La tua risposta precedente non era un JSON valido o era incompleta. "
