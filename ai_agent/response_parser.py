@@ -1,3 +1,4 @@
+import ast
 import re
 from typing import Optional, Tuple
 
@@ -9,6 +10,9 @@ class ResponseParserMixin:
         fixed_code = self._extract_block_after_heading(response_text, r"codice\s+corretto")
         candidate_code = fixed_code.strip() if fixed_code and not no_bug else ""
         if candidate_code:
+            state_error = self._find_removed_instance_state(candidate_code)
+            if state_error:
+                return "failed", state_error
             with self._lock:
                 self.fixed_code = candidate_code
 
@@ -41,6 +45,39 @@ class ResponseParserMixin:
 
         return "failed", err_log
 
+    def _find_removed_instance_state(self, candidate_code: str) -> str:
+        if not self.target_file or self.target_file.suffix.lower() != ".py":
+            return ""
+
+        try:
+            original_tree = ast.parse(self.target_file.read_text(encoding="utf-8-sig"))
+            candidate_tree = ast.parse(candidate_code.lstrip("\ufeff"))
+        except (OSError, SyntaxError):
+            return ""
+
+        original_attrs = self._collect_self_attrs(original_tree)
+        candidate_attrs = self._collect_self_attrs(candidate_tree)
+        removed = original_attrs - candidate_attrs
+        if not removed:
+            return ""
+
+        names = ", ".join(sorted(removed))
+        return (
+            "Patch non valida: rimuove attributi di stato esistenti "
+            f"({names}). Mantieni lo stato originale e proponi una correzione minima."
+        )
+
+    @staticmethod
+    def _collect_self_attrs(tree: ast.AST) -> set[str]:
+        attrs: set[str] = set()
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "self"
+            ):
+                attrs.add(node.attr)
+        return attrs
     def _run_tests_against_candidate(
         self,
         response_text: str,
@@ -80,3 +117,4 @@ class ResponseParserMixin:
 
         block = re.search(r"```[^\n]*\n(.*?)\n```", response_text[heading.end():], re.DOTALL)
         return block.group(1) if block else None
+

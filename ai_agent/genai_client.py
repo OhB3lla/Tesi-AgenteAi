@@ -1,4 +1,4 @@
-import time
+﻿import time
 from pathlib import Path
 
 from google import genai
@@ -66,7 +66,8 @@ class GenAIClient:
             "1. Proponi la modifica minima necessaria per correggere il bug osservato.\n"
             "2. Non aggiungere nuove feature, nuovi campi di stato o nuovi concetti di dominio.\n"
             "3. Non introdurre logiche temporali, calendario, reset giornaliero o datetime se non sono gia presenti nel codice originale.\n"
-            "4. I test devono verificare solo il comportamento documentato dal codice target, non requisiti inventati.\n\n"
+            "4. I test devono verificare solo il comportamento documentato dal codice target, non requisiti inventati.\n"
+            "5. Non rimuovere attributi di stato gia presenti nel codice originale: se esiste self.withdrawn_today, preservalo e usalo per la validazione cumulativa.\n\n"
             "Formato obbligatorio della risposta:\n"
             "- Se trovi un bug, usa queste sezioni:\n"
             "  ## ANALISI DELL'ERRORE\n"
@@ -94,7 +95,9 @@ class GenAIClient:
             "7. Per verificare eccezioni usa try/except espliciti oppure lambda/funzioni senza argomenti.\n"
             "8. Non mescolare mai argomenti posizionali dopo keyword argument: e SyntaxError in Python.\n"
             "9. Non inventare requisiti non presenti nel codice o nella docstring del file target.\n"
-            "10. Non proporre comandi distruttivi o comandi che non eseguono il test.\n\n"
+            "10. Non ridefinire nel test classi o funzioni gia presenti nel file target: usa direttamente quelle fornite.\n"
+            "11. Non usare assert dentro lambda: in Python e SyntaxError. Definisci una funzione normale per ogni assert.\n"
+            "12. Non proporre comandi distruttivi o comandi che non eseguono il test.\n\n"
             "Concludi sempre fuori dai blocchi di codice con:\n"
             "DEPENDENCIES: NONE\n"
             "TEST_FILE_NAME: <nome_file_test>\n"
@@ -110,3 +113,4 @@ class GenAIClient:
             )
 
         return prompt
+

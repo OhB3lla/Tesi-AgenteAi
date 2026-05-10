@@ -1,3 +1,4 @@
+import ast
 import os
 import re
 import shlex
@@ -47,6 +48,14 @@ class TestRunnerMixin:
 
         if "sys.exit" in test_code and "import sys" not in test_code:
             test_code = "import sys\n" + test_code
+
+        syntax_error = self._validate_python_test_syntax(test_code)
+        if syntax_error:
+            return "failed", syntax_error
+
+        shadow_error = self._find_shadowed_target_symbols(test_code)
+        if shadow_error:
+            return "failed", shadow_error
 
         test_code = self._prepare_python_test_code(test_code)
 
@@ -132,6 +141,50 @@ class TestRunnerMixin:
         with self._lock:
             self.test_status = "Fallito"
         return "structured_failed", ""
+
+    @staticmethod
+    def _validate_python_test_syntax(test_code: str) -> str:
+        try:
+            ast.parse(test_code)
+            return ""
+        except SyntaxError as exc:
+            location = f"linea {exc.lineno}" if exc.lineno else "posizione sconosciuta"
+            return (
+                "Test non valido: il codice Python generato non e sintatticamente valido "
+                f"({location}: {exc.msg}). Correggi il test usando funzioni normali; "
+                "non usare assert dentro lambda."
+            )
+    def _find_shadowed_target_symbols(self, test_code: str) -> str:
+        if not self.target_file or self.target_file.suffix.lower() != ".py":
+            return ""
+
+        try:
+            target_tree = ast.parse(self.target_file.read_text(encoding="utf-8-sig"))
+            test_tree = ast.parse(test_code)
+        except (OSError, SyntaxError):
+            return ""
+
+        target_symbols = {
+            node.name
+            for node in target_tree.body
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and not node.name.startswith("_")
+        }
+        if not target_symbols:
+            return ""
+
+        test_symbols = {
+            node.name
+            for node in test_tree.body
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in target_symbols
+        }
+        if not test_symbols:
+            return ""
+
+        names = ", ".join(sorted(test_symbols))
+        return (
+            "Test non valido: ridefinisce simboli del file target "
+            f"({names}) invece di usare il codice reale da validare."
+        )
 
     def _prepare_python_test_code(self, test_code: str) -> str:
         if not self.target_file or self.target_file.suffix.lower() != ".py":
@@ -279,3 +332,4 @@ class TestRunnerMixin:
                     path.unlink()
             except Exception:
                 pass
+
