@@ -1,3 +1,4 @@
+import json
 import queue
 import threading
 import time
@@ -5,7 +6,7 @@ from pathlib import Path
 
 from google import genai
 
-from .config import API_TIMEOUT_SECONDS
+from .config import API_TIMEOUT_SECONDS, LANGUAGE_NAMES, SOURCE_EXTENSIONS
 
 
 class GenAIClient:
@@ -28,7 +29,11 @@ class GenAIClient:
             for attempt in range(2):
                 try:
                     response = self._generate_content(model_name, prompt)
-                    return response.text or ""
+                    raw_text = (response.text or "").strip()
+                    cleaned = self._clean_json_response(raw_text)
+                    return cleaned
+                except ValueError:
+                    raise
                 except Exception as exc:
                     err = str(exc)
                     if isinstance(exc, TimeoutError):
@@ -51,6 +56,44 @@ class GenAIClient:
         raise RuntimeError(
             "Nessun modello Gemini disponibile. Controllare connessione e API key."
         )
+
+    @staticmethod
+    def _clean_json_response(raw_text: str) -> str:
+        cleaned = raw_text.strip()
+
+        if cleaned.startswith("```"):
+            lines = cleaned.splitlines()
+            if lines:
+                lines = lines[1:]
+            cleaned = "\n".join(lines).strip()
+
+        if cleaned.endswith("```"):
+            lines = cleaned.splitlines()
+            if lines:
+                lines = lines[:-1]
+            cleaned = "\n".join(lines).strip()
+
+        try:
+            json.loads(cleaned)
+            return cleaned
+        except json.JSONDecodeError as first_error:
+            start = cleaned.find("{")
+            end = cleaned.rfind("}")
+            if start != -1 and end != -1 and start < end:
+                candidate = cleaned[start : end + 1].strip()
+                try:
+                    json.loads(candidate)
+                    return candidate
+                except json.JSONDecodeError as second_error:
+                    raise ValueError(
+                        "Risposta AI non è JSON valido dopo pulizia: "
+                        + str(second_error)
+                    ) from second_error
+
+            raise ValueError(
+                "Risposta AI non è JSON valido dopo pulizia: "
+                + str(first_error)
+            ) from first_error
 
     def _generate_content(self, model_name: str, prompt: str):
         result_queue: queue.Queue = queue.Queue(maxsize=1)
@@ -86,17 +129,12 @@ class GenAIClient:
     ) -> str:
         target_ext = target_file.suffix.lower()
         is_python = target_ext == ".py"
-        language_name = {
-            ".py": "Python",
-            ".js": "JavaScript",
-            ".ts": "TypeScript",
-            ".dart": "Dart",
-            ".swift": "Swift",
-            ".java": "Java",
-            ".cpp": "C++",
-            ".c": "C",
-            ".cs": "C#",
-        }.get(target_ext, "linguaggio del file target")
+        language_name = LANGUAGE_NAMES.get(target_ext, "linguaggio del file target")
+        supported_note = (
+            "Estensione supportata dal runner locale."
+            if target_ext in SOURCE_EXTENSIONS
+            else "Estensione non presente tra quelle supportate dal runner locale."
+        )
 
         patch_rules = [
             "1. Proponi la modifica minima necessaria per correggere il bug osservato.",
@@ -126,7 +164,7 @@ class GenAIClient:
             "9. Non ridefinire nel test classi, funzioni o tipi gia presenti nel file target: usa direttamente il codice reale da validare.",
             "10. Non impostare manualmente i contatori finali: Passed e Failed devono derivare dai casi eseguiti.",
             "11. Non usare frasi o commenti come manual analysis, assumo, simuliamo il conteggio o valori manuali.",
-            "12. Non usare operatori di shell come &&, || o ; nel RUN_COMMAND: indica un comando diretto e semplice.",
+            "12. Non usare operatori di shell come &&, || o ; nel campo run_command: indica un comando diretto e semplice.",
         ]
         if is_python:
             test_rules.extend(
@@ -154,31 +192,29 @@ class GenAIClient:
             "Ignora stile, formattazione e preferenze personali.\n\n"
             f"FILE TARGET: {target_file}\n"
             f"LINGUAGGIO TARGET: {language_name}\n"
+            f"SUPPORTO LOCALE: {supported_note}\n"
             f"CODICE TARGET:\n{source_code}\n\n"
             f"CONTESTO ARCHITETTURALE:\n{context_code}\n\n"
             "Vincoli sulla patch:\n"
             + "\n".join(patch_rules)
             + "\n\n"
-            "Formato obbligatorio della risposta:\n"
-            "- Se trovi un bug, usa queste sezioni:\n"
-            "  ## ANALISI DELL'ERRORE\n"
-            "  ## CODICE CORRETTO\n"
-            "  ```linguaggio\n"
-            "  <file target completo corretto>\n"
-            "  ```\n"
-            "  ## UNIT TEST\n"
-            "  ```linguaggio\n"
-            "  <test flat e autonomo>\n"
-            "  ```\n"
-            "- Se non trovi bug, scrivi chiaramente 'Nessun bug' e fornisci comunque "
-            "un test basilare di convalida.\n\n"
             "Vincoli sui test:\n"
             + "\n".join(test_rules)
             + "\n\n"
-            "Concludi sempre fuori dai blocchi di codice con:\n"
-            "DEPENDENCIES: NONE\n"
-            "TEST_FILE_NAME: <nome_file_test>\n"
-            "RUN_COMMAND: <comando_per_eseguire_il_test>\n"
+            "Rispondi ESCLUSIVAMENTE con un oggetto JSON valido. "
+            "Nessun testo prima o dopo. Nessun blocco markdown. Nessun backtick. "
+            "La struttura deve essere esattamente questa:\n"
+            "{\n"
+            '  "has_bug": true,\n'
+            '  "analysis": "spiegazione del bug o conferma che non ce ne sono",\n'
+            '  "fixed_code": "intero file corretto come stringa, oppure null",\n'
+            '  "test_code": "codice del test come stringa",\n'
+            '  "test_file_name": "nome_file_test.estensione",\n'
+            '  "run_command": "comando diretto senza operatori shell"\n'
+            "}\n"
+            "Il campo has_bug deve essere true se trovi un bug, altrimenti false.\n"
+            "Se has_bug è false, fixed_code deve essere null.\n"
+            "Se has_bug è true, fixed_code deve contenere il file completo corretto.\n"
         )
 
         if error_feedback:

@@ -1,29 +1,48 @@
 import ast
-import re
-from typing import Optional, Tuple
+import json
+from typing import Tuple
 
 
 class ResponseParserMixin:
     def _handle_ai_response(self, response_text: str) -> Tuple[str, str]:
-        no_bug = bool(re.search(r"\bnessun\s+bug\b", response_text, re.IGNORECASE))
+        try:
+            data = json.loads(response_text)
+        except json.JSONDecodeError as exc:
+            return "failed", "Risposta AI non è JSON valido: " + str(exc)
 
-        fixed_code = self._extract_block_after_heading(response_text, r"codice\s+corretto")
-        candidate_code = fixed_code.strip() if fixed_code and not no_bug else ""
+        required_fields = ("has_bug", "analysis", "test_code", "test_file_name", "run_command")
+        for field in required_fields:
+            if field not in data:
+                return "failed", f"JSON incompleto: campo mancante: {field}"
+
+        if not isinstance(data["has_bug"], bool):
+            return "failed", "JSON incoerente: has_bug deve essere true o false."
+
+        fixed_code = data.get("fixed_code")
+        test_code = data["test_code"]
+        cmd = data["run_command"]
+        t_file = data["test_file_name"]
+
+        if data["has_bug"] and not str(fixed_code or "").strip():
+            return (
+                "failed",
+                "JSON incoerente: has_bug è true ma fixed_code è assente. Rigenera la risposta.",
+            )
+
+        if not str(test_code or "").strip():
+            return "failed", "JSON incoerente: test_code è vuoto."
+
+        if any(operator in str(cmd) for operator in ("&&", "||", ";", "|")):
+            return "failed", "run_command contiene operatori shell non consentiti."
+
+        no_bug = not data["has_bug"]
+        candidate_code = str(fixed_code).strip() if fixed_code and not no_bug else ""
         if candidate_code:
             state_error = self._find_removed_instance_state(candidate_code)
             if state_error:
                 return "failed", state_error
             with self._lock:
                 self.fixed_code = candidate_code
-
-        cmd = self._extract_metadata(response_text, "RUN_COMMAND")
-        t_file = self._extract_metadata(response_text, "TEST_FILE_NAME")
-
-        if not cmd or not t_file:
-            return (
-                "failed",
-                "Risposta AI incompleta: mancano TEST_FILE_NAME e/o RUN_COMMAND.",
-            )
 
         if candidate_code:
             run_result, err_log = self._run_tests_against_candidate(
@@ -113,18 +132,4 @@ class ResponseParserMixin:
                 self.target_file.write_bytes(original_bytes)
             except OSError:
                 pass
-
-    @staticmethod
-    def _extract_metadata(response_text: str, key: str) -> Optional[str]:
-        match = re.search(rf"^{re.escape(key)}:\s*(.+)$", response_text, re.IGNORECASE | re.MULTILINE)
-        return match.group(1).strip() if match else None
-
-    @staticmethod
-    def _extract_block_after_heading(response_text: str, heading_pattern: str) -> Optional[str]:
-        heading = re.search(rf"##\s*{heading_pattern}.*?$", response_text, re.IGNORECASE | re.MULTILINE)
-        if not heading:
-            return None
-
-        block = re.search(r"```[^\n]*\n(.*?)\n```", response_text[heading.end():], re.DOTALL)
-        return block.group(1) if block else None
 

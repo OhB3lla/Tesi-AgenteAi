@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-from .config import MAX_FILE_LINES, MAX_FILE_SIZE_BYTES, ZERO_SHA_RE
+from .config import MAX_FILE_LINES, MAX_FILE_SIZE_BYTES, SOURCE_EXTENSIONS, ZERO_SHA_RE
 from .git_utils import get_repo_root, to_git_path
 from .process_utils import run_process
 
@@ -15,7 +15,6 @@ class SizeCheck:
 
 
 class GitManager:
-    SOURCE_EXTENSIONS = (".py", ".dart", ".swift", ".js", ".ts", ".java", ".cpp", ".c", ".cs")
     EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
     @staticmethod
@@ -113,7 +112,7 @@ class GitManager:
 
     @staticmethod
     def is_source_file(path: Path) -> bool:
-        return path.suffix.lower() in GitManager.SOURCE_EXTENSIONS
+        return path.suffix.lower() in SOURCE_EXTENSIONS
 
     @staticmethod
     def is_file_too_large(path: Path) -> SizeCheck:
@@ -143,27 +142,47 @@ class GitManager:
         return SizeCheck(False, "")
 
     @staticmethod
-    def get_context_files(target_file: Path, max_files: int = 3) -> List[Path]:
+    def get_context_files(target_file: Path, max_files: int = 5) -> List[Path]:
         """
-        Prende pochi file vicini al target, con stessa estensione.
+        Prende pochi file sorgente vicini al target, anche di linguaggi diversi.
 
         Il contesto e utile, ma deve restare piccolo per non gonfiare il prompt.
+        I file con nome collegato al target hanno priorita, poi quelli con la
+        stessa estensione e infine gli altri sorgenti della stessa directory.
         """
         target_dir = target_file.parent
         target_ext = target_file.suffix.lower()
+        target_stem = target_file.stem.lower()
         context_files: List[Path] = []
 
         if not target_dir.exists():
             return context_files
 
-        for candidate in sorted(target_dir.iterdir(), key=lambda p: p.name.lower()):
+        candidates: List[Path] = []
+        for candidate in target_dir.iterdir():
             if candidate.resolve() == target_file.resolve():
                 continue
-            if not candidate.is_file() or candidate.suffix.lower() != target_ext:
+            if not candidate.is_file() or not GitManager.is_source_file(candidate):
                 continue
             if GitManager.is_file_too_large(candidate).too_large:
                 continue
 
+            candidates.append(candidate)
+
+        def context_rank(path: Path) -> tuple[int, str]:
+            stem = path.stem.lower()
+            ext = path.suffix.lower()
+            if stem == target_stem:
+                rank = 0
+            elif target_stem in stem or stem in target_stem:
+                rank = 1
+            elif ext == target_ext:
+                rank = 2
+            else:
+                rank = 3
+            return rank, path.name.lower()
+
+        for candidate in sorted(candidates, key=context_rank):
             context_files.append(candidate)
             if len(context_files) >= max_files:
                 break

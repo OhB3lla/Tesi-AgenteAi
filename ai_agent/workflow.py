@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Optional
 
 from .bypass import set_bypass_flag
-from .config import MAX_FILES_TO_ANALYZE, MAX_RETRY_ATTEMPTS
+from .config import LANGUAGE_NAMES, MAX_FILES_TO_ANALYZE, MAX_RETRY_ATTEMPTS, RETRY_DELAYS_SECONDS
 from .credentials import resolve_api_key
 from .experiment_logger import ExperimentLogger
 from .genai_client import GenAIClient
@@ -48,6 +48,8 @@ class AgentWorkflowMixin:
                 self.target_file = file_path
                 api_time = 0.0
                 file_start = time.time()
+                iterations_used = 0
+                language = LANGUAGE_NAMES.get(file_path.suffix.lower(), file_path.suffix.lower().lstrip("."))
 
                 self.safe_log("\n" + "=" * 60)
                 self.safe_log(f"[{idx}/{self._total_files}] Analisi file: {file_path.name}")
@@ -65,6 +67,8 @@ class AgentWorkflowMixin:
                         "Saltato automaticamente",
                         0.0,
                         round(time.time() - file_start, 2),
+                        language=LANGUAGE_NAMES.get(file_path.suffix.lower(), file_path.suffix.lower().lstrip(".")),
+                        iterations=0,
                     )
                     continue
 
@@ -76,6 +80,7 @@ class AgentWorkflowMixin:
                 for attempt in range(MAX_RETRY_ATTEMPTS):
                     if self._should_stop():
                         break
+                    iterations_used = attempt + 1
 
                     self.safe_log(
                         f"  [Iterazione {attempt + 1}/{MAX_RETRY_ATTEMPTS}] "
@@ -108,8 +113,21 @@ class AgentWorkflowMixin:
 
                     if result == "failed":
                         llm_status = "Test non eseguibile"
-                        error_feedback = err_log or "Esecuzione fallita senza output utile."
+                        if err_log and any(
+                            marker in err_log
+                            for marker in ("non è JSON valido", "JSON incompleto", "JSON incoerente")
+                        ):
+                            error_feedback = (
+                                "La tua risposta precedente non era un JSON valido o era incompleta. "
+                                "Rispondi SOLO con il JSON richiesto. Nessun testo prima o dopo. Nessun backtick."
+                            )
+                        else:
+                            error_feedback = err_log or "Esecuzione fallita senza output utile."
                         self.safe_log("  [!] Test non eseguibile. Invio feedback all'AI.")
+                        if attempt < MAX_RETRY_ATTEMPTS - 1:
+                            delay = RETRY_DELAYS_SECONDS[min(attempt, len(RETRY_DELAYS_SECONDS) - 1)]
+                            self.safe_log(f"  [retry] Nuovo tentativo tra {delay} secondi.")
+                            time.sleep(delay)
                         continue
 
                     llm_status = "Formato non valido"
@@ -148,6 +166,8 @@ class AgentWorkflowMixin:
                         self.action_taken,
                         round(api_time, 2),
                         session_time,
+                        language=language,
+                        iterations=iterations_used,
                     )
 
             self.safe_log("\n" + "=" * 60)
@@ -242,6 +262,9 @@ class AgentWorkflowMixin:
         )
         try:
             return ai_client.analyze_code(target_file, source_code, context_code, error_feedback)
+        except ValueError as exc:
+            self.safe_log(f"  [!] Risposta AI non valida: {exc}")
+            return str(exc)
         except Exception as exc:
             self.safe_log(f"  [!] Errore API: {exc}")
             return None

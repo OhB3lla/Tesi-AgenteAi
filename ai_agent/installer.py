@@ -31,6 +31,7 @@ def install_hook(script_path: Path) -> None:
         pre_push_path.write_text(bash_hook, encoding="utf-8")
         current_mode = pre_push_path.stat().st_mode
         pre_push_path.chmod(current_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        _update_gitignore(Path(target_dir))
 
         print("Hook pre-push installato correttamente.")
         print(f"Percorso: {pre_push_path}")
@@ -44,3 +45,28 @@ def install_hook(script_path: Path) -> None:
         sys.exit(1)
 
     sys.exit(0)
+
+
+def _update_gitignore(repo_root: Path) -> None:
+    gitignore_path = repo_root / ".gitignore"
+    entries = [".api_key", "thesis_metrics.csv"]
+
+    try:
+        if gitignore_path.exists():
+            lines = gitignore_path.read_text(encoding="utf-8").splitlines()
+        else:
+            lines = []
+
+        existing = {line.strip() for line in lines}
+        missing = [entry for entry in entries if entry not in existing]
+        if not missing:
+            return
+
+        updated_lines = list(lines)
+        if updated_lines and updated_lines[-1].strip():
+            updated_lines.append("")
+        updated_lines.extend(missing)
+        gitignore_path.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
+        print(f"Aggiunto al .gitignore: {', '.join(missing)}")
+    except Exception as exc:
+        print(f"Avviso: impossibile aggiornare .gitignore: {exc}")

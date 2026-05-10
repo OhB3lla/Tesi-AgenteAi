@@ -1,6 +1,7 @@
 import difflib
 import shutil
 import time
+import uuid
 
 import tkinter as tk
 
@@ -220,7 +221,7 @@ class ReviewDialogMixin:
         try:
             backup_dir = self.git_dir / "ai_agent_backups"
             backup_dir.mkdir(parents=True, exist_ok=True)
-            backup_path = backup_dir / f"{int(time.time())}_{abs_path.name}.bak"
+            backup_path = backup_dir / f"{uuid.uuid4().hex}_{abs_path.name}.bak"
             shutil.copy2(abs_path, backup_path)
 
             abs_path.write_text(self.fixed_code, encoding="utf-8")

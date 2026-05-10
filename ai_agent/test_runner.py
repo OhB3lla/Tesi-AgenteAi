@@ -1,4 +1,5 @@
 import ast
+import json
 import os
 import re
 import shlex
@@ -15,6 +16,14 @@ from .process_utils import run_process
 
 class TestRunnerMixin:
     def _extract_test_block(self, response_text: str) -> Optional[str]:
+        try:
+            data = json.loads(response_text)
+            test_code = data.get("test_code")
+            if isinstance(test_code, str):
+                return test_code.strip()
+        except json.JSONDecodeError:
+            pass
+
         unit_heading = re.search(r"##\s*unit\s+test.*?$", response_text, re.IGNORECASE | re.MULTILINE)
         if unit_heading:
             block = re.search(r"```[^\n]*\n(.*?)\n```", response_text[unit_heading.end():], re.DOTALL)
@@ -39,13 +48,15 @@ class TestRunnerMixin:
     def _run_tests(self, response_text: str, cmd: str, t_file_name: str) -> Tuple[str, str]:
         test_code = self._extract_test_block(response_text)
         if not test_code:
-            return self._record_test_failure("Blocco UNIT TEST non trovato nella risposta AI.")
+            return self._record_test_failure("Codice del test vuoto.")
 
         test_code = re.sub(
             r"(?im)^(DEPENDENCIES|TEST_FILE_NAME|RUN_COMMAND):.*$",
             "",
             test_code,
         ).strip()
+        if not test_code:
+            return self._record_test_failure("Codice del test vuoto.")
 
         if not self.target_file:
             return self._record_test_failure("File target non impostato.")
@@ -129,12 +140,17 @@ class TestRunnerMixin:
         temp_dir = self.repo_root / f".ai_agent_java_{uuid.uuid4().hex}"
         test_path = temp_dir / f"{class_name}.java"
         try:
+            if not shutil.which("javac"):
+                return self._record_test_failure("javac non trovato. Installa Java Development Kit (JDK).")
+
             temp_dir.mkdir(parents=True, exist_ok=False)
             test_path.write_text(test_code, encoding="utf-8")
 
             compile_res = run_process(
                 [
                     "javac",
+                    "--release",
+                    "11",
                     "-encoding",
                     "UTF-8",
                     "-d",
@@ -395,10 +411,21 @@ class TestRunnerMixin:
         if target_ext == ".py" or executable in ("python", "python3", "py"):
             return [sys.executable, str(test_path)], "", []
 
-        if target_ext in (".js", ".ts") or executable == "node":
+        if target_ext == ".ts":
+            if shutil.which("tsx"):
+                return ["tsx", str(test_path)], "", []
+            if shutil.which("ts-node"):
+                return ["ts-node", str(test_path)], "", []
+            return [], "Nessun runtime TypeScript trovato. Installa tsx con: npm install -g tsx", []
+
+        if target_ext == ".js" or executable == "node":
+            if not shutil.which("node"):
+                return [], "node non trovato. Installa Node.js.", []
             return ["node", str(test_path)], "", []
 
         if target_ext == ".dart" or executable == "dart":
+            if not shutil.which("dart"):
+                return [], "dart non trovato. Installa il Dart SDK.", []
             return ["dart", str(test_path)], "", []
 
         if target_ext == ".swift":
@@ -424,6 +451,9 @@ class TestRunnerMixin:
     def _compile_swift(self, test_path: Path) -> Tuple[List[str], str, List[Path]]:
         if not self.target_file:
             return [], "File target non impostato.", []
+
+        if not shutil.which("swiftc"):
+            return [], "swiftc non trovato. Installa Xcode Command Line Tools con: xcode-select --install", []
 
         target_dir = self.target_file.parent
         swift_files = sorted(str(path) for path in target_dir.glob("*.swift"))
