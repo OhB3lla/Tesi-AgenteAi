@@ -55,19 +55,71 @@ class GenAIClient:
         context_code: str,
         error_feedback: str,
     ) -> str:
+        target_ext = target_file.suffix.lower()
+        is_python = target_ext == ".py"
+        language_name = {
+            ".py": "Python",
+            ".js": "JavaScript",
+            ".ts": "TypeScript",
+            ".dart": "Dart",
+            ".swift": "Swift",
+            ".java": "Java",
+            ".cpp": "C++",
+            ".c": "C",
+            ".cs": "C#",
+        }.get(target_ext, "linguaggio del file target")
+
+        patch_rules = [
+            "1. Proponi la modifica minima necessaria per correggere il bug osservato.",
+            "2. Non aggiungere nuove feature, nuovi campi di stato o nuovi concetti di dominio.",
+            "3. Non introdurre logiche temporali, calendario o reset giornaliero se non sono gia presenti nel codice originale.",
+            "4. I test devono verificare solo il comportamento documentato dal codice target, non requisiti inventati.",
+            "5. Non rimuovere campi, attributi o variabili di stato gia presenti se partecipano al comportamento esistente.",
+        ]
+        if is_python:
+            patch_rules.append(
+                "6. Per Python, non rimuovere attributi self.* gia presenti: se esiste self.withdrawn_today, preservalo e usalo per la validazione cumulativa."
+            )
+
+        test_rules = [
+            "1. Niente framework esterni, database o servizi remoti.",
+            "2. Il test deve essere flat e autonomo, scritto nel linguaggio piu adatto al file target.",
+            "3. Il test deve stampare una riga leggibile per ogni caso verificato:",
+            "   [PASS] <descrizione del caso>",
+            "   [FAIL] <descrizione del caso>: <motivo>",
+            "4. L'output deve includere sia i casi superati sia quelli falliti, non solo gli errori.",
+            "5. Alla fine il test deve stampare esattamente queste metriche:",
+            "   Passed: <numero>",
+            "   Failed: <numero>",
+            "6. Il test deve terminare con exit code 0 se passa e non-zero se fallisce.",
+            "7. Per verificare eccezioni o errori usa costrutti espliciti del linguaggio target.",
+            "8. Non inventare requisiti non presenti nel codice o nella docstring/commenti del file target.",
+            "9. Non ridefinire nel test classi, funzioni o tipi gia presenti nel file target: usa direttamente il codice reale da validare.",
+        ]
+        if is_python:
+            test_rules.extend(
+                [
+                    "10. Vincoli specifici Python: niente unittest, pytest, classi di test o decorator.",
+                    "11. Vincoli specifici Python: non usare assert dentro lambda; in Python e SyntaxError.",
+                    "12. Vincoli specifici Python: non catturare o sostituire sys.stdout e non usare StringIO; stampa direttamente su console.",
+                    "13. Vincoli specifici Python: non mescolare argomenti posizionali dopo keyword argument.",
+                    "14. Non proporre comandi distruttivi o comandi che non eseguono il test.",
+                ]
+            )
+        else:
+            test_rules.append("10. Non proporre comandi distruttivi o comandi che non eseguono il test.")
+
         prompt = (
             "Sei un revisore automatico di codice per un progetto universitario.\n"
             "Analizza solo difetti logici, bug reali e casi limite rilevanti. "
             "Ignora stile, formattazione e preferenze personali.\n\n"
             f"FILE TARGET: {target_file}\n"
+            f"LINGUAGGIO TARGET: {language_name}\n"
             f"CODICE TARGET:\n{source_code}\n\n"
             f"CONTESTO ARCHITETTURALE:\n{context_code}\n\n"
             "Vincoli sulla patch:\n"
-            "1. Proponi la modifica minima necessaria per correggere il bug osservato.\n"
-            "2. Non aggiungere nuove feature, nuovi campi di stato o nuovi concetti di dominio.\n"
-            "3. Non introdurre logiche temporali, calendario, reset giornaliero o datetime se non sono gia presenti nel codice originale.\n"
-            "4. I test devono verificare solo il comportamento documentato dal codice target, non requisiti inventati.\n"
-            "5. Non rimuovere attributi di stato gia presenti nel codice originale: se esiste self.withdrawn_today, preservalo e usalo per la validazione cumulativa.\n\n"
+            + "\n".join(patch_rules)
+            + "\n\n"
             "Formato obbligatorio della risposta:\n"
             "- Se trovi un bug, usa queste sezioni:\n"
             "  ## ANALISI DELL'ERRORE\n"
@@ -82,23 +134,8 @@ class GenAIClient:
             "- Se non trovi bug, scrivi chiaramente 'Nessun bug' e fornisci comunque "
             "un test basilare di convalida.\n\n"
             "Vincoli sui test:\n"
-            "1. Niente framework esterni: no pytest, junit, database o servizi remoti.\n"
-            "2. Il test deve stampare una riga leggibile per ogni caso verificato:\n"
-            "   [PASS] <descrizione del caso>\n"
-            "   [FAIL] <descrizione del caso>: <motivo>\n"
-            "3. L'output deve includere sia i casi superati sia quelli falliti, non solo gli errori.\n"
-            "4. Alla fine il test deve stampare esattamente queste metriche:\n"
-            "   Passed: <numero>\n"
-            "   Failed: <numero>\n"
-            "5. Il test deve terminare con exit code 0 se passa e non-zero se fallisce.\n"
-            "6. Il test deve essere uno script Python flat: niente unittest, pytest, classi di test o decorator.\n"
-            "7. Per verificare eccezioni usa try/except espliciti oppure lambda/funzioni senza argomenti.\n"
-            "8. Non mescolare mai argomenti posizionali dopo keyword argument: e SyntaxError in Python.\n"
-            "9. Non inventare requisiti non presenti nel codice o nella docstring del file target.\n"
-            "10. Non ridefinire nel test classi o funzioni gia presenti nel file target: usa direttamente quelle fornite.\n"
-            "11. Non usare assert dentro lambda: in Python e SyntaxError. Definisci una funzione normale per ogni assert.\n"
-            "12. Non catturare o sostituire sys.stdout e non usare StringIO: stampa direttamente su console.\n"
-            "13. Non proporre comandi distruttivi o comandi che non eseguono il test.\n\n"
+            + "\n".join(test_rules)
+            + "\n\n"
             "Concludi sempre fuori dai blocchi di codice con:\n"
             "DEPENDENCIES: NONE\n"
             "TEST_FILE_NAME: <nome_file_test>\n"
@@ -114,4 +151,3 @@ class GenAIClient:
             )
 
         return prompt
-

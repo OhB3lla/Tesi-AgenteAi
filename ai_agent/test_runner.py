@@ -46,23 +46,24 @@ class TestRunnerMixin:
             test_code,
         ).strip()
 
-        if "sys.exit" in test_code and "import sys" not in test_code:
-            test_code = "import sys\n" + test_code
+        is_python_target = bool(self.target_file and self.target_file.suffix.lower() == ".py")
+        if is_python_target:
+            if "sys.exit" in test_code and "import sys" not in test_code:
+                test_code = "import sys\n" + test_code
 
-        syntax_error = self._validate_python_test_syntax(test_code)
-        if syntax_error:
-            return self._record_test_failure(syntax_error)
+            syntax_error = self._validate_python_test_syntax(test_code)
+            if syntax_error:
+                return self._record_test_failure(syntax_error)
 
-        stdout_error = self._find_stdout_capture(test_code)
-        if stdout_error:
-            return self._record_test_failure(stdout_error)
+            stdout_error = self._find_stdout_capture(test_code)
+            if stdout_error:
+                return self._record_test_failure(stdout_error)
 
-        shadow_error = self._find_shadowed_target_symbols(test_code)
-        if shadow_error:
-            return self._record_test_failure(shadow_error)
+            shadow_error = self._find_shadowed_target_symbols(test_code)
+            if shadow_error:
+                return self._record_test_failure(shadow_error)
 
-        test_code = self._prepare_python_test_code(test_code)
-
+            test_code = self._prepare_python_test_code(test_code)
         safe_name = self._safe_test_file_name(t_file_name)
         test_path = self._make_temp_test_path(safe_name)
 
