@@ -6,7 +6,7 @@ from pathlib import Path
 
 from google import genai
 
-from .config import API_TIMEOUT_SECONDS, LANGUAGE_NAMES, SOURCE_EXTENSIONS
+from .config import API_TIMEOUT_SECONDS, LANGUAGE_NAMES, RETRY_DELAYS_SECONDS, SOURCE_EXTENSIONS
 
 
 class GenAIClient:
@@ -27,7 +27,7 @@ class GenAIClient:
 
         for model_name in self.MODELS:
             print(f"[API] Connessione al modello: {model_name}")
-            for attempt in range(2):
+            for attempt in range(len(RETRY_DELAYS_SECONDS) + 1):
                 try:
                     response = self._generate_content(model_name, prompt)
                     raw_text = (response.text or "").strip()
@@ -46,9 +46,10 @@ class GenAIClient:
                         print(f"[API] Modello non disponibile: {model_name}.")
                         break
                     if any(marker in err for marker in ("503", "UNAVAILABLE", "429")):
-                        if attempt == 0:
-                            print("[API] Servizio temporaneamente saturo. Riprovo tra 5 secondi.")
-                            time.sleep(5)
+                        if attempt < len(RETRY_DELAYS_SECONDS):
+                            delay = RETRY_DELAYS_SECONDS[attempt]
+                            print(f"[API] Servizio temporaneamente saturo. Riprovo tra {delay} secondi.")
+                            time.sleep(delay)
                             continue
                         print(f"[API] Modello non raggiungibile: {model_name}.")
                         break
@@ -178,38 +179,39 @@ class GenAIClient:
             "15. Il test deve continuare a eseguire tutti i casi anche quando un caso fallisce; stampa le metriche solo alla fine.",
             "16. Se usi un helper assert con callback o lambda, controlla davvero il valore restituito dalla callback.",
             "17. In fixed_code e test_code scrivi codice reale eseguibile, non pseudocodice, placeholder o spiegazioni.",
+            "18. Il file di test temporaneo viene scritto nella stessa directory del file target: usa import relativi coerenti, ad esempio './NomeFile'.",
         ]
         if is_python:
             test_rules.extend(
                 [
-                    "18. Vincoli specifici Python: niente unittest, pytest, classi di test o decorator.",
-                    "19. Vincoli specifici Python: non usare assert dentro lambda; in Python e SyntaxError.",
-                    "20. Vincoli specifici Python: non catturare o sostituire sys.stdout e non usare StringIO; stampa direttamente su console.",
-                    "21. Vincoli specifici Python: non mescolare argomenti posizionali dopo keyword argument.",
-                    "22. Non proporre comandi distruttivi o comandi che non eseguono il test.",
+                    "19. Vincoli specifici Python: niente unittest, pytest, classi di test o decorator.",
+                    "20. Vincoli specifici Python: non usare assert dentro lambda; in Python e SyntaxError.",
+                    "21. Vincoli specifici Python: non catturare o sostituire sys.stdout e non usare StringIO; stampa direttamente su console.",
+                    "22. Vincoli specifici Python: non mescolare argomenti posizionali dopo keyword argument.",
+                    "23. Non proporre comandi distruttivi o comandi che non eseguono il test.",
                 ]
             )
         else:
-            test_rules.append("18. Non proporre comandi distruttivi o comandi che non eseguono il test.")
+            test_rules.append("19. Non proporre comandi distruttivi o comandi che non eseguono il test.")
             if target_ext == ".java":
                 test_rules.extend(
                     [
-                        "19. Vincoli specifici Java: la classe di test deve contenere una sola public static void main(String[] args).",
-                        "20. Vincoli specifici Java: non duplicare il metodo main e non inserire codice fuori dalla classe pubblica.",
+                        "20. Vincoli specifici Java: la classe di test deve contenere una sola public static void main(String[] args).",
+                        "21. Vincoli specifici Java: non duplicare il metodo main e non inserire codice fuori dalla classe pubblica.",
                     ]
                 )
             elif target_ext in (".c", ".cpp"):
                 test_rules.extend(
                     [
-                        "19. Vincoli specifici C/C++: il test deve contenere un solo main.",
-                        "20. Vincoli specifici C/C++: non includere direttamente il file target se il runner lo compila insieme al test; dichiara solo i prototipi necessari.",
+                        "20. Vincoli specifici C/C++: il test deve contenere un solo main.",
+                        "21. Vincoli specifici C/C++: non includere direttamente il file target se il runner lo compila insieme al test; dichiara solo i prototipi necessari.",
                     ]
                 )
             elif target_ext == ".cs":
                 test_rules.extend(
                     [
-                        "19. Vincoli specifici C#: il test deve contenere un solo entry point static Main.",
-                        "20. Vincoli specifici C#: non usare pacchetti NuGet o framework esterni.",
+                        "20. Vincoli specifici C#: il test deve contenere un solo entry point static Main.",
+                        "21. Vincoli specifici C#: non usare pacchetti NuGet o framework esterni.",
                     ]
                 )
 

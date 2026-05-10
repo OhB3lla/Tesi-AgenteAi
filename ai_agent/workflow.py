@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Optional
 
 from .bypass import set_bypass_flag
-from .config import LANGUAGE_NAMES, MAX_FILES_TO_ANALYZE, MAX_RETRY_ATTEMPTS, RETRY_DELAYS_SECONDS
+from .config import LANGUAGE_NAMES, MAX_FILES_TO_ANALYZE, MAX_RETRY_ATTEMPTS
 from .credentials import resolve_api_key
 from .experiment_logger import ExperimentLogger
 from .genai_client import GenAIClient
@@ -124,10 +124,6 @@ class AgentWorkflowMixin:
                         else:
                             error_feedback = err_log or "Esecuzione fallita senza output utile."
                         self.safe_log("  [!] Test non eseguibile. Invio feedback all'AI.")
-                        if attempt < MAX_RETRY_ATTEMPTS - 1:
-                            delay = RETRY_DELAYS_SECONDS[min(attempt, len(RETRY_DELAYS_SECONDS) - 1)]
-                            self.safe_log(f"  [retry] Nuovo tentativo tra {delay} secondi.")
-                            time.sleep(delay)
                         continue
 
                     llm_status = "Formato non valido"

@@ -58,6 +58,9 @@ class TestRunnerMixin:
         if not test_code:
             return self._record_test_failure("Codice del test vuoto.")
 
+        with self._lock:
+            self.generated_test_code = test_code
+
         if not self.target_file:
             return self._record_test_failure("File target non impostato.")
 
@@ -647,7 +650,11 @@ class TestRunnerMixin:
         return base
 
     def _make_temp_test_path(self, safe_name: str) -> Path:
-        return self.repo_root / f".ai_agent_test_{uuid.uuid4().hex}_{safe_name}"
+        base_dir = self.repo_root
+        if self.target_file and self.target_file.suffix.lower() in {".py", ".js", ".ts", ".dart", ".swift"}:
+            base_dir = self.target_file.parent
+
+        return base_dir / f".ai_agent_test_{uuid.uuid4().hex}_{safe_name}"
 
     def _build_test_command(
         self,
